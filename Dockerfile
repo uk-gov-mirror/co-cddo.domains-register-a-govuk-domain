@@ -32,6 +32,7 @@ ENV DOMAIN_NAME=http://localhost:2010
 
 RUN /app/manage.py collectstatic --no-input
 
+VOLUME /tmp
 RUN mkdir /var/run/request_a_govuk_domain && \
     chown govuk_domain:govuk_domain /var/run/request_a_govuk_domain
 
