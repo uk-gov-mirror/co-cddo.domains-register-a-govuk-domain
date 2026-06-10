@@ -1,7 +1,3 @@
-**The project is in initial stages**
-
-**README file is in work-in-progress. It will be updated as the project progresses.**
-
 ## Application description
 
 The application is a frontend client to apply for gov.uk domains.
@@ -20,6 +16,12 @@ Steps to run the project locally on docker:
 1. Clone the repository
 2. Go to the project directory: domains-register-a-govuk-domain
 3. Ensure docker is running on your machine
+4. Build the containers:
+
+``` bash
+make build
+```
+
 4. Run one of the following commands to run the application:
 
 - Using gunicorn:
@@ -38,7 +40,7 @@ When the application is run:
 
 ## Usage instructions
 
-The user-facing application is accessible via http://localhost:8000
+The user-facing application is accessible via http://localhost:8010
 
 Note: The application is in initial stages and the forms are at prototype/R&D stage. The pages on the application and logic within them are not yet representative of application.
 
@@ -49,7 +51,9 @@ The team can view and assess registration applications via the Django admin site
 
 ## Development instructions
 
-This project uses Poetry for dependency management and packaging. To install Poetry, follow the instructions at https://python-poetry.org/
+You can start developing directly with the docker setup. The container will reload the app if you make changes to the source code, and tests will run with `make test`.
+
+If you're more comfortable running the application locally without docker, you will need Poetry for dependency management and packaging. To install Poetry, follow the instructions at https://python-poetry.org/
 
 To install dependencies for local development ( e.g. when using IDE to make changes ) , use `poetry install`.
 
@@ -79,6 +83,30 @@ If additional groups are added or other fundamental changes made which mean the 
 ```
 python manage.py dumpdata auth.user --indent 2
 ```
+
+### Synthetic data
+
+For local development, or user testing, it is recommended to use synthetic data instead of sensitive production data. There is a management command to do so:
+
+``` bash
+./manage.py create_sample_data
+```
+
+It can be run either in the application running locally without docker, or in a docker shell (`make shell`) if the local app is running in docker.
+
+If the database to be populated is remote (like in a test account in RDS), then you'll need to connect to the database using the instructions found in the `domains-api` repository, in the tools directory.
+
+Then you'll need to change the `DATABASE_URL` environment variable, either in your local shell, or in the `docker-compose.yml` file. The format will be something like:
+
+``` bash
+DATABASE_URL: postgresql://password@host:5433/registration
+```
+
+- `password` will be the database password, as found in the secrets manager
+- `host` will be `localhost`, or `host.docker.internal` if running in docker.
+
+Once this is set you can run the `create_sample_data` command above. Note that this is a destructive operation since it'll delete existing applications before adding new ones. The db users will be unchanged though.
+
 
 ### Clearing the database
 
@@ -123,6 +151,17 @@ Following are some of the make commands:
 `make clear-db` - Delete the database volume
 
 
+## Unit testing
+
+There is a unit test suite that is run when pushing to github. It can also be run manually
+with:
+
+`poetry run ./manage.py test`
+
+Some tests require clamav to run or will try to send email, so if you're working on something else you might want to run specific tests instead, with:
+
+`ENVIRONMENT=local poetry run ./manage.py tests.test_admin_approval.ModelAdminTestCase.test_create_approval_works_0_approve`
+
 ## End-to-end testing
 
 You need to have NodeJS installed, along with npm.
@@ -138,3 +177,5 @@ Then, to run the tests, you need to have the prototype running on port 8000 (see
 ```
 npx cypress run
 ```
+
+Note that the cookie banner tests require the application to run with the `GOOGLE_ANALYTICS_ID` environment variable set to something that starts with `GTM-`. The easiest way is to add `GOOGLE_ANALYTICS_ID=GTM-TEST` in your `.env` file.

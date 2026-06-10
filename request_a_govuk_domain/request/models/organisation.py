@@ -1,28 +1,20 @@
-from django.utils.translation import gettext_lazy as _
 from django.db import models
+from django.utils.translation import gettext_lazy as _
+from simple_history.models import HistoricalRecords
 
 
 class RegistrantTypeChoices(models.TextChoices):
-    CENTRAL_GOVERNMENT = "central_government", _(
-        "Central government department or agency"
-    )
+    CENTRAL_GOVERNMENT = "central_government", _("Central government department or agency")
     ALB = "alb", _("Non-departmental body - also known as an arm's length body")
-    PARISH_COUNCIL = "parish_council", _("Parish or community council")
-    LOCAL_AUTHORITY = "local_authority", _(
-        "Town, county, borough, metropolitan or district council"
-    )
+    PARISH_COUNCIL = "parish_council", _("Parish, town or community council")
+    LOCAL_AUTHORITY = "local_authority", _("District, borough, city or county council")
     FIRE_SERVICE = "fire_service", _("Fire service")
-    VILLAGE_COUNCIL = "village_council", _("Neighbourhood or village council")
     COMBINED_AUTHORITY = "combined_authority", _("Combined or unitary authority")
     PCC = "pcc", _("Police and crime commissioner")
     JOINT_AUTHORITY = "joint_authority", _("Joint authority")
     JOINT_COMMITTEE = "joint_committee", _("Joint committee")
-    PSB_GROUP = "psb_group", _(
-        "Organisation representing a group of public sector bodies"
-    )
-    PSB_PROFESSION = "psb_profession", _(
-        "Organisation representing a profession across public sector bodies"
-    )
+    PSB_GROUP = "psb_group", _("Organisation representing a group of public sector bodies")
+    PSB_PROFESSION = "psb_profession", _("Organisation representing a profession across public sector bodies")
 
     @classmethod
     def get_label(cls, code: str | None) -> str | None:
@@ -50,6 +42,9 @@ class Registrant(models.Model):
     name = models.CharField()
     type = models.CharField(choices=RegistrantTypeChoices.choices, max_length=100)
 
+    # maintain history
+    history = HistoricalRecords()
+
     class Meta:
         unique_together = ("name", "type")
 
@@ -67,6 +62,10 @@ class Registrar(models.Model):
     """
 
     name = models.CharField(unique=True)
+    active = models.BooleanField(default=True)
+
+    # maintain history
+    history = HistoricalRecords()
 
     def __str__(self):
         return self.name

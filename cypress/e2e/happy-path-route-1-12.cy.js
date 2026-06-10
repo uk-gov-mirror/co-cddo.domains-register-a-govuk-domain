@@ -1,13 +1,17 @@
 import './base.cy'
 
 describe('Happy path - route 1-12', () => {
+  beforeEach(() => {
+    cy.deleteAllApplications()
+  })
+
   it('performs a full transaction', () => {
     cy.goToRegistrarDetails()
     cy.fillOutRegistrarDetails('WeRegister', 'Joe Bloggs', '01225672345', 'simulate-delivered@notifications.service.gov.uk')
 
     cy.checkPageTitleIncludes('Who is this domain name for?')
     cy.checkBackLinkGoesTo('/registrar-details/')
-    cy.chooseRegistrantType(3) // Parish or community council -> route 1
+    cy.chooseRegistrantType(3) // Parish, small town or community council -> route 1
 
     cy.checkPageTitleIncludes('Choose a .gov.uk domain name')
     cy.checkBackLinkGoesTo('/registrant-type/')
@@ -46,8 +50,16 @@ describe('Happy path - route 1-12', () => {
     cy.summaryShouldHave(6, ['Clerk', 'clerk@example.org'])
     cy.summaryShouldNotHave(['Reason for request', 'Minister', 'Permission', 'Exemption'])
 
-    cy.get('#button-continue').click()
+    cy.get('#id_submit').click()
 
     cy.checkPageTitleIncludes('Application submitted')
+    cy.checkApplicationIsOnBackend({
+      domain: 'somethingelse-pc.gov.uk',
+      registrar_org: 'WeRegister',
+      registrant_org: 'HMRC',
+      minister: false,
+      written_permission: false,
+      exemption: false
+    })
   })
 })

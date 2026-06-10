@@ -9,9 +9,12 @@ https://docs.djangoproject.com/en/4.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
+import logging
 import os
+import re
 import uuid
 from pathlib import Path
+
 from environ import Env
 
 env = Env(
@@ -37,9 +40,7 @@ if DEBUG:
 
     load_dotenv()
 
-SECRET_KEY: str = (
-    str(uuid.uuid4()) if DEBUG else env.str("SECRET_KEY", default="not_set")
-)
+SECRET_KEY: str = str(uuid.uuid4()) if DEBUG else env.str("SECRET_KEY", default="not_set")
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 ENVIRONMENT = env.str("ENVIRONMENT", default=None)
@@ -47,9 +48,7 @@ ENVIRONMENT = env.str("ENVIRONMENT", default=None)
 # AWS related settings
 IS_AWS: bool = env.bool("IS_AWS", default=False)
 IS_SCANNING_ENABLED: bool = env.bool("SCANNING_ENABLED", default=True)
-AWS_STORAGE_BUCKET_NAME = env.str(
-    "S3_MEDIA_ROOT", default=f"registration-app-media-root-{ENVIRONMENT}"
-)
+AWS_STORAGE_BUCKET_NAME = env.str("S3_MEDIA_ROOT", default=f"registration-app-media-root-{ENVIRONMENT}")
 
 # Application definition
 
@@ -71,6 +70,8 @@ INSTALLED_APPS = [
     "simple_history",
     "phonenumber_field",
     "storages",
+    "django_celery_results",
+    "macros",
 ]
 
 CRISPY_ALLOWED_TEMPLATE_PACKS = ["gds"]
@@ -86,7 +87,10 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "simple_history.middleware.HistoryRequestMiddleware",
 ]
+
+X_FRAME_OPTIONS = "SAMEORIGIN"
 
 FILE_UPLOAD_HANDLERS = [
     "django.core.files.uploadhandler.MemoryFileUploadHandler",
@@ -101,11 +105,16 @@ TEMPLATES = [
         "DIRS": [],
         "APP_DIRS": True,
         "OPTIONS": {
+            "libraries": {
+                "csp": "csp.templatetags.csp",
+            },
             "context_processors": [
+                "csp.context_processors.nonce",
                 "django.template.context_processors.debug",
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "request_a_govuk_domain.request.utils.variable_page_content",
             ],
         },
     },
@@ -132,9 +141,7 @@ if "RDS_DB_NAME" in os.environ:
     }
 else:
     DATABASES = {
-        "default": env.db_url(
-            default="postgresql:///govuk_domain", engine="psqlextra.backend"
-        ),
+        "default": env.db_url(default="postgresql:///govuk_domain", engine="psqlextra.backend"),
     }
 
 # Password validation
@@ -215,7 +222,7 @@ LOGGING = {
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
-STATIC_URL = "/static/"
+STATIC_URL = "/assets/"
 STATIC_ROOT = os.path.join(BASE_DIR, "static")
 # Django Whitenoise Configuration
 WHITENOISE_SKIP_COMPRESS_EXTENSIONS = [".map"]
@@ -233,7 +240,7 @@ CONTENT_TYPES = ["png", "jpeg", "jpg", "pdf"]
 # 10 MB
 MAX_UPLOAD_SIZE = "10485760"
 
-CLAMD_TCP_ADDR = "clamav" if not IS_AWS else "clamav.internal-domains-registry-cluster"
+CLAMD_TCP_ADDR = env.str("CLAMD_TCP_ADDR", default="clamav.internal-domains-registry-cluster")
 CLAMD_TCP_SOCKET = 3310
 
 # Cross-site request forgery protection
@@ -246,16 +253,33 @@ if not DEBUG:
     CSRF_FAILURE_VIEW = "request_a_govuk_domain.request.views.csrf_failure_view"
     SESSION_COOKIE_SECURE = True
 
+# Set session (end-user or admin) to expire in 24 hours
+SESSION_COOKIE_AGE = 24 * 60 * 60
+
 # Content Security Policy: only allow images, stylesheets and scripts from the
 # same origin as the HTML
-CSP_IMG_SRC = "'self'"
-CSP_STYLE_SRC = "'self' 'sha256-Yrk+0r8BB7VG8053Bq5134CtNrZCcfqaGMD3xHpM9gI='"  # pragma: allowlist secret
-CSP_SCRIPT_SRC = "'self' 'sha256-Gl/oWhJuv5Q73KslDBQ6Lf8TnR2wF1dznPZHMCb6P64=' 'sha256-mWnAScliK6FEboYjWY+46J2JHS2Rc/1osNHmEf8xhEg=' 'sha256-XnQ3IfOhmMbP75i80XPTDYp0PiESaF/qwUDCGZnUwRk='"  # pragma: allowlist secret'
+CSP_IMG_SRC = "'self' data:"
+CSP_STYLE_SRC = "'self'"
+CSP_SCRIPT_SRC = "'self' https://*.googletagmanager.com"
+CSP_CONNECT_SRC = "'self' https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com"
+CSP_FRAME_SRC = "'self' https://www.googletagmanager.com"
 CSP_FORM_ACTION = "'self'"
 CSP_FRAME_ANCESTORS = "'self'"
-
+CSP_INCLUDE_NONCE_IN = [
+    "script-src",
+    "img-src",
+    "connect-src",
+    "frame-src",
+    "style-src",
+]
 # Disable CSP for debug as it prevent the style sheets from loading on  localhost
-CSP_REPORT_ONLY = DEBUG
+CSP_REPORT_ONLY = False
+
+# If we want to test CSP breaches we need to set a fake reporting URL, so the tests
+# check if it's been called.
+if "TEST_CSP" in os.environ:
+    CSP_REPORT_URI = "/csp-report"  # The URI doesn't exist but is intercepted by the test suite
+
 
 # HTTP Strict Transport Security settings
 # Tell browsers to only use HTTPS for a year
@@ -268,8 +292,68 @@ SENTRY_DSN = env.str("SENTRY_DSN", default=None)
 if SENTRY_DSN is not None:
     import sentry_sdk
 
+    def traces_sampler(sampling_context):
+        # Disable the health check and the email failure task sampling and
+        # also reduce the sampling for other events by 1/5, for the prod environment we sample 100%
+        if (
+            sampling_context["transaction_context"]["name"]
+            == "request_a_govuk_domain.request.tasks.check_email_failure_and_notify"
+        ) or (
+            sampling_context["transaction_context"]["name"] == "generic WSGI request"
+            and sampling_context["wsgi_environ"]["HTTP_USER_AGENT"] == "ELB-HealthChecker/2.0"
+        ):
+            return 0.0 if ENVIRONMENT in ["dev", "test", "stage"] else 0.1
+        else:
+            # Any other traces reduce the rate for non-prod
+            return 0.2 if ENVIRONMENT in ["dev", "test"] else 1
+
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         enable_tracing=True,
         environment=ENVIRONMENT,
+        traces_sampler=traces_sampler,
     )
+
+# Only enable S3 storage if it is explicitly enabled or on AWS
+S3_STORAGE_ENABLED = env.bool("S3_STORAGE_ENABLED", default=IS_AWS)
+
+CELERY_BROKER_URL = env.str("CELERY_BROKER_URL", "redis://localhost/0")
+CELERY_RESULT_BACKEND = "django-db"
+CELERY_TASK_DEFAULT_QUEUE = env.str("QUEUE_NAME", "celery")
+CELERY_BEAT_SCHEDULE_FILENAME = env.str("CELERY_BEAT_SCHEDULE_FILENAME", default="celerybeat-schedule")
+CELERY_BROKER_TRANSPORT_OPTIONS = env.json("CELERY_BROKER_TRANSPORT_OPTIONS", {})
+# The setting "CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True" is to get rid of the following deprecation warning
+# message, which shows up in the Cloudwatch Celery worker logs
+#
+# PendingDeprecationWarning: The broker_connection_retry configuration setting will no longer determine
+# whether broker connection retries are made during startup in Celery 6.0 and above. If you wish to retain the
+# existing behavior for retrying connections on startup, you should set broker_connection_retry_on_startup to True.
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# Apply the filter only if we are running under the Gunicorn server on AWS.
+#   - We use Gunicon server when the application is deployed on AWS
+#   - We only get these type of requests (health check probes) only on AWS
+is_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
+if is_gunicorn:
+
+    class LbCheckFilter(logging.Filter):
+        """
+        filter out loadbalancer successful check respnse.
+        This is needed to reduce the log entries in our application log
+        """
+
+        expression = re.compile(r'.*?GET / HTTP/1.1" 200.*?ELB-HealthChecker/2.0.*')
+
+        def filter(self, record):
+            return not self.expression.match(record.getMessage())
+
+    gunicorn_logger = logging.getLogger("gunicorn.access")
+    current_filters = gunicorn_logger.filters
+    add_filter = True
+    if current_filters:
+        # Make sure we do not add the filter multiple times
+        for filter in current_filters:
+            if type(filter) is LbCheckFilter:
+                add_filter = False
+    if add_filter:
+        gunicorn_logger.addFilter(LbCheckFilter())

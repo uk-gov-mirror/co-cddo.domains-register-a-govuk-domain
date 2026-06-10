@@ -14,53 +14,67 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
-from django.contrib import admin
-from django.urls import path
-from django.conf.urls.static import static
 from django.conf import settings
+from django.conf.urls.static import static
+from django.contrib import admin
+from django.urls import path, re_path
 
-from .request.views import (
-    StartView,
-    RegistrarDetailsView,
-    RegistrantTypeView,
-    DomainView,
-    DomainConfirmationView,
-    RegistrantDetailsView,
-    RegistryDetailsView,
-    RegistrantTypeFailView,
-    WrittenPermissionView,
-    WrittenPermissionFailView,
-    ExemptionUploadRemoveView,
-    WrittenPermissionUploadRemoveView,
-    MinisterUploadRemoveView,
-    ConfirmView,
-    SuccessView,
-    ExemptionView,
-    MinisterView,
-    ExemptionUploadView,
-    MinisterUploadView,
-    WrittenPermissionUploadView,
-    ExemptionUploadConfirmView,
-    MinisterUploadConfirmView,
-    WrittenPermissionUploadConfirmView,
-    ExemptionFailView,
-    DomainPurposeView,
-    DomainPurposeFailView,
-    service_failure_view,
-    page_not_found_view,
-    security_txt_view,
-    robots_txt_view,
-    forbidden_view,
+from .request.admin.views import (
+    AdminDashboardView,
+    ApplicationByRefView,
+    ChangeStatusView,
+    DecisionConfirmationView,
+    ReviewByRefView,
 )
-
-from .request.admin.views import DecisionConfirmationView
-
+from .request.views import (
+    AccessibilityView,
+    ConfirmView,
+    CookiesPageView,
+    DomainConfirmationView,
+    DomainPurposeFailView,
+    DomainPurposeView,
+    DomainView,
+    ExemptionFailView,
+    ExemptionUploadConfirmView,
+    ExemptionUploadRemoveView,
+    ExemptionUploadView,
+    ExemptionView,
+    MinisterUploadConfirmView,
+    MinisterUploadRemoveView,
+    MinisterUploadView,
+    MinisterView,
+    PrivacyPolicyPageView,
+    RegistrantDetailsView,
+    RegistrantTypeFailView,
+    RegistrantTypeView,
+    RegistrarDetailsView,
+    RegistryDetailsView,
+    StartSessionView,
+    StartView,
+    SuccessView,
+    TermsAndConditionsView,
+    WrittenPermissionFailView,
+    WrittenPermissionUploadConfirmView,
+    WrittenPermissionUploadRemoveView,
+    WrittenPermissionUploadView,
+    WrittenPermissionView,
+    bad_request_view,
+    download_file,
+    forbidden_view,
+    page_not_found_view,
+    robots_txt_view,
+    security_txt_view,
+    service_failure_view,
+)
 
 urlpatterns = [
     path("", StartView.as_view(), name="start"),
-    path(
-        "registrar-details/", RegistrarDetailsView.as_view(), name="registrar_details"
-    ),
+    path("cookies", CookiesPageView.as_view(), name="cookies_page"),
+    path("accessibility", AccessibilityView.as_view(), name="accessibility_page"),
+    path("privacy", PrivacyPolicyPageView.as_view(), name="privacy_policy"),
+    path("terms", TermsAndConditionsView.as_view(), name="terms_and_conditions"),
+    path("start-session/", StartSessionView.as_view(), name="start_session"),
+    path("registrar-details/", RegistrarDetailsView.as_view(), name="registrar_details"),
     path(
         "change-registrar-details/",
         RegistrarDetailsView.as_view(change=True),
@@ -121,6 +135,22 @@ urlpatterns = [
         DecisionConfirmationView.as_view(),
         name="application_confirm",
     ),
+    path(
+        "admin/change_status_view/",
+        ChangeStatusView.as_view(),
+        name="change_status_view",
+    ),
+    re_path(
+        r"^admin/request/review_by_ref/(?P<ref>GOVUK.+)/$",
+        ReviewByRefView.as_view(),
+        name="admin_review_by_reference",
+    ),
+    re_path(
+        r"^admin/request/application_by_ref/(?P<ref>GOVUK.+)/$",
+        ApplicationByRefView.as_view(),
+        name="admin_application_by_reference",
+    ),
+    path("admin/", AdminDashboardView.as_view(), name="admin_dashboard"),
     path("admin/", admin.site.urls),
     path(
         "registrant-type-fail/",
@@ -168,6 +198,7 @@ urlpatterns = [
     ),
     path(".well-known/security.txt", security_txt_view),
     path("robots.txt", robots_txt_view),
+    path("download_file/<str:file_type>", download_file, name="download_file"),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 
@@ -175,3 +206,4 @@ handler500 = service_failure_view
 handler404 = page_not_found_view
 handler403 = forbidden_view
 handler401 = forbidden_view
+handler400 = bad_request_view

@@ -8,6 +8,12 @@ repos:
         exclude: request_a_govuk_domain/static|seed/
     -   id: trailing-whitespace
         exclude: request_a_govuk_domain/static|seed/
+# Sort import statements
+- repo: https://github.com/pycqa/isort
+  rev: 5.12.0
+  hooks:
+    - id: isort
+      name: isort
 # Enforce code style
 -   repo: https://github.com/psf/black
     rev: 23.12.0
@@ -25,12 +31,14 @@ repos:
     rev: v1.4.0
     hooks:
     -   id: detect-secrets
-        exclude: (^\.github/workflows/)|package\.lock\.json|(^tests/fixtures/)|request_a_govuk_domain/static|seed/
+        exclude: (^\.github/workflows/)|package\.lock\.json|(^tests/fixtures/)|request_a_govuk_domain/static|seed|request_a_govuk_domain/request/static/.+.js
 -   repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.10.0
     hooks:
     -   id: mypy
         exclude: wsgi.py
+        verbose: true
+        args: [--pretty]
         additional_dependencies:
         -    types-six
         -    'django-stubs[compatible-mypy]'
@@ -50,3 +58,9 @@ repos:
         -    notifications-python-client
         -    markdown
         -    types-Markdown
+        -    celery
+        -    django_celery_results
+        -    django-macros
+        -    pandas
+        -    requests
+        -    types-requests

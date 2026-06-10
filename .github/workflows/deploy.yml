@@ -1,0 +1,100 @@
+name: Build and Publish to ECR
+
+#########################################
+# Image deployment route to ECR
+# PR to main deploys to     => dev
+# push to main deploys to   => dev, test
+# PR to stable deploys to   => staging
+# push to stable deploys to => prod
+#########################################
+
+on:
+  pull_request:
+    branches: [main, stable]
+  push:
+    branches:
+    - main
+    - stable
+  workflow_dispatch:  # deploys restricted to dev and test manually from GitHub Actions UI
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - DEV
+          - TEST
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  setup:
+    name: Resolve target environments
+    runs-on: ubuntu-22.04
+    outputs:
+      environments: ${{ steps.resolve.outputs.environments }}
+      push_latest: ${{ steps.resolve.outputs.push_latest }}
+    steps:
+      - name: Resolve environments
+        id: resolve
+        run: |
+          EVENT="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          BASE="${{ github.base_ref }}"
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            ENVS='["${{ inputs.environment }}"]'
+          elif [[ "$EVENT" == "push" && "$REF" == "refs/heads/stable" ]]; then
+            ENVS='["PROD"]'
+          elif [[ "$EVENT" == "push" && "$REF" == "refs/heads/main" ]]; then
+            ENVS='["DEV","TEST"]'
+          elif [[ "$EVENT" == "pull_request" && "$BASE" == "stable" ]]; then
+            ENVS='["STAGING"]'
+          else
+            ENVS='["DEV"]'
+          fi
+          echo "environments=${ENVS}" >> $GITHUB_OUTPUT
+
+  push:
+    name: Push image (${{ matrix.environment }})
+    needs: setup
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJson(needs.setup.outputs.environments) }}
+    env:
+      ENVIRONMENT: ${{ matrix.environment }}
+    steps:
+      - name: Resolve AWS Account
+        env:
+          AWS_ACCOUNT_IDS: ${{ secrets.AWS_ACCOUNT_IDS }}
+        run: |
+          echo "AWS_ACCOUNT_ID=$(echo "$AWS_ACCOUNT_IDS" | jq -r --arg e "$ENVIRONMENT" '.[$e]')" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: ECR Login
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Verify ECR repository exists before build and push
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPO_NAME: "cddo-domains-registration-ecr"
+        run: |
+          IMAGE=${ECR_REGISTRY}/${ECR_REPO_NAME}
+          aws ecr describe-repositories \
+            --repository-names "${ECR_REPO_NAME}" > /dev/null 2>&1 \
+            || { echo "::error::ECR repository ${ECR_REPO_NAME} does not exist. Create it via IaC before running this workflow."; exit 1; }
+
+          docker build --tag "$IMAGE:${{ github.sha }}" --tag "$IMAGE:latest" .
+          docker push "$IMAGE" --all-tags

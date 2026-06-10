@@ -23,10 +23,14 @@ makemigrations:
 	docker compose run --entrypoint "python manage.py makemigrations" web
 
 migrate-devserver:
-	docker exec -it domains-register-a-govuk-domain-web-1 ./manage.py migrate
+	docker exec -it `docker ps --format '{{.Names}}' | grep web` ./manage.py migrate
 
 clear-db:
 	docker compose down && docker container prune -f && docker volume rm domains-register-a-govuk-domain_postgres-data
 
 test:
-	docker compose run --rm --service-ports --entrypoint "python manage.py test -v 2" web
+	docker compose run --rm --service-ports --entrypoint "python manage.py test $(TEST) -v 2" web
+
+
+create-sample-data:
+	docker compose exec web bash -c "python manage.py create_sample_data"

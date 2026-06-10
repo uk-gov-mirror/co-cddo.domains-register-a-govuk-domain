@@ -1,23 +1,97 @@
+import csv
+import logging
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import django.db.models.fields.files
 import markdown
+import pandas as pd
+import requests
 from django.contrib import admin, messages
-from django.contrib.admin import ChoicesFieldListFilter
+from django.contrib.admin import ModelAdmin
 from django.contrib.admin.widgets import AdminFileWidget
 from django.contrib.auth.admin import GroupAdmin, UserAdmin
-from django.http import HttpResponseRedirect, FileResponse
+from django.http import FileResponse, HttpResponse, HttpResponseRedirect
 from django.template.loader import render_to_string
-from django.urls import reverse, path
+from django.urls import path, reverse
 from django.utils.html import format_html
+from simple_history.admin import SimpleHistoryAdmin
 
 from request_a_govuk_domain.request.models import (
     Application,
+    ApplicationStatus,
+    Registrant,
+    RegistrantPerson,
+    Registrar,
+    RegistrarPerson,
+    RegistryPublishedPerson,
     Review,
     ReviewFormGuidance,
-    ApplicationStatus,
+)
+
+from ..models.storage_util import s3_root_storage
+from .filters import (
+    LastUpdatedFilter,
+    OwnerFilter,
+    RegistrantOrgFilter,
+    RegistrarOrgFilter,
+    StatusFilter,
+    wrap_with_application_filter,
 )
 from .forms import ReviewForm
+
+LOGGER = logging.getLogger(__name__)
+
+
+class FileDownloadMixin:
+    """
+    Provide file download support for the given admin class.
+    """
+
+    def download_file_view(self, request, object_id, field_name):
+        """
+        Implement this method to provide the specific retrieval of the object based on the given id
+        :param request: Current request object
+        :param object_id: id of the object containing the field
+        :param field_name: which file field to download from the object
+        :return:
+        """
+        pass
+
+    @property
+    def uid(self):
+        """
+        Unique id for the current subclass
+        :return:
+        """
+        pass
+
+    def get_urls(self):
+        """
+        Generate the custom url for the download_file_view.
+        :return:
+        """
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                f"download_{self.uid}/<int:object_id>/<str:field_name>/",
+                self.admin_site.admin_view(self.download_file_view),
+                name=f"{self.uid}_download_file",
+            ),
+        ]
+        return custom_urls + urls
+
+    def generate_download_link(self, obj, field_name, link_text):
+        link = reverse(f"admin:{self.uid}_download_file", args=[obj.pk, field_name])
+        return format_html(f'<a href="{link}" target="_blank">{link_text}</a>')
+
+
+class CustomAdminFileWidget(AdminFileWidget):
+    """
+    Extend the default template to open the links on a new tab
+    """
+
+    template_name = "admin/clearable_file_input.html"
 
 
 class DomainRegistrationUserAdmin(UserAdmin):
@@ -40,17 +114,187 @@ def convert_to_local_time(obj):
     :param obj:
     :return:
     """
-    return (
-        obj.astimezone(ZoneInfo("Europe/London")).strftime("%d %b %Y %H:%M:%S %p")
-        if obj
-        else "-"
+    return obj.astimezone(ZoneInfo("Europe/London")).strftime("%d %b %Y %H:%M:%S %p") if obj else "-"
+
+
+class ReportDownLoadMixin:
+    """
+    Mixin that can be included in to any model admin to generate csv reports.
+    """
+
+    def get_field_names(self):
+        """
+        Get the field names for the given model
+        :return: list of field names
+        """
+        return [field.name for field in self.model._meta.fields]
+
+    def changelist_view(self, request, extra_context=None):
+        # Fetch holidays when the page loads
+        self._uk_holidays = self._fetch_bank_holidays()
+        return super().changelist_view(request, extra_context)
+
+    @admin.action(  # type: ignore
+        permissions=["export"],
+        description="Download as csv file",
     )
+    def export(self, _request, queryset):
+        """
+        Generate a CSV file from the given queryset.
+        :param _request:
+        :param queryset:
+        :return:
+        """
+        meta = self.model._meta
+        field_names = self.get_field_names()
+
+        response = HttpResponse(content_type="text/csv")
+        response[
+            "Content-Disposition"
+        ] = f"attachment; filename={meta}_{datetime.today().strftime('%Y-%m-%d')}_data_backup.csv"
+        writer = csv.writer(response)
+
+        writer.writerow(field_names)
+        for obj in queryset:
+            row = []
+            for field in field_names:
+                if field == "Date Submitted":
+                    row.append(self.format_date(obj.time_submitted))
+                elif field == "Registrar org":
+                    row.append(obj.registrar_org.name if obj.registrar_org else "")
+                elif field == "Domain name":
+                    row.append(obj.domain_name)
+                elif field == "Organisation type":
+                    row.append("")
+                elif field == "Application month":
+                    row.append(self.get_application_month(obj.time_submitted))
+                elif field == "Calendar days to complete":
+                    row.append(self.get_days_between(obj))
+                elif field == "Date application is processed":
+                    row.append(self.get_date_application_processed(obj))
+                elif field == "Business days to complete":
+                    row.append(self.get_business_days_to_complete(obj))
+                elif field == "Application reviewed by":
+                    row.append(obj.last_updated_by)
+                elif field == "Approval Rejection comment":
+                    row.append(obj.approval_or_rejection_comment)
+                else:
+                    row.append(self.format_field(obj, field))
+            writer.writerow(row)
+
+        return response
+
+    def get_application_month(self, date: datetime | None) -> str:
+        """
+        Get the application month from the date_submitted field.
+        :param date:
+        :return: application month in 'April' format if date is in April.
+        """
+        return date.strftime("%B") if date else ""
+
+    def get_date_application_processed(self, app: Application) -> str:
+        """
+        Get the date the application was processed (approved or rejected).
+        :param app: Application object
+        :return: Date as a string
+        """
+        if app.status in [ApplicationStatus.APPROVED, ApplicationStatus.REJECTED]:
+            return self.format_date(app.time_decided)
+        return ""
+
+    def _fetch_bank_holidays(self) -> list[datetime]:
+        """Return a list of dates of UK bank holiday dates as returned by gov.uk"""
+        try:
+            response = requests.get("https://www.gov.uk/bank-holidays.json")
+            response.raise_for_status()
+            data = response.json()
+            uk_holidays = [item["date"] for item in data["england-and-wales"]["events"]]
+            uk_bank_holidays = pd.to_datetime(uk_holidays)
+            holidays_list = (
+                uk_bank_holidays.date.tolist() if hasattr(uk_bank_holidays, "date") else list(uk_bank_holidays)
+            )
+        except Exception as e:
+            LOGGER.error(f"Error fetching holidays data: {e}")
+            holidays_list = []
+        return holidays_list
+
+    def get_business_days_to_complete(self, app: Application) -> int:
+        """
+        Calculate the number of business days to complete the application.
+        :param app: Application object
+        :return: Number of business days
+        """
+        if not app.time_submitted or not app.time_decided or app.time_submitted == app.time_decided:
+            return 0
+
+        net_days = len(pd.bdate_range(app.time_submitted, app.time_decided, freq="C", holidays=self._uk_holidays))
+
+        if net_days == 1:
+            return 0
+        else:
+            return max(0, net_days - 1)
+
+    def format_field(self, obj: object, field: str) -> str:
+        """
+        Human readable names for the status and truncated datetime to date
+        :param obj:
+        :param field:
+        :return: the updated field
+        """
+        field_value = getattr(obj, field)
+        if field == "status":
+            field_value = ApplicationStatus(field_value).label
+        elif isinstance(field_value, datetime):
+            field_value = field_value.strftime("%Y-%m-%d")
+        return field_value
+
+    def format_date(self, date):
+        """
+        Format the date to D/M/YYYY
+        :param date:
+        :return: formatted date string
+        """
+        return date.strftime("%d/%m/%Y") if date else ""
+
+    def get_days_between(self, app: Application) -> int:
+        return app.time_elapsed().days
+
+    def has_export_permission(self, request, obj=None):
+        return request.user.is_superuser
 
 
-class ReviewAdmin(admin.ModelAdmin):
+class ArchiveMixin:
+    @admin.action(  # type: ignore
+        permissions=["archive"],
+        description="Archive selected applications",
+    )
+    def archive(self, request, queryset):
+        queryset.update(status=ApplicationStatus.ARCHIVE, last_updated_by=request.user)
+
+    def has_archive_permission(self, request, obj=None):
+        """
+        Only admins can archive
+        :param request:
+        :param obj:
+        :return:
+        """
+        return request.user.is_superuser
+
+
+class ReviewAdmin(SimpleHistoryAdmin, FileDownloadMixin, ReportDownLoadMixin, admin.ModelAdmin):
     model = Review
     form = ReviewForm
     change_form_template = "admin/review_change_form.html"
+    actions = ["export"]
+    list_select_related = [
+        "application",
+        "application__owner",
+        "application__last_updated_by",
+        "application__registrar_person",
+        "application__registrant_person",
+        "application__registrant_org",
+        "application__registrar_org",
+    ]
 
     list_display = (
         "get_reference",
@@ -60,34 +304,37 @@ class ReviewAdmin(admin.ModelAdmin):
         "get_registrant_org",
         "get_time_submitted",
         "get_last_updated",
+        "time_decided_local_time",
+        "get_last_updated_by",
         "get_owner",
     )
-
-    def generate_download_link(self, obj, field_name, link_text):
-        link = reverse("admin:review_download_file", args=[obj.pk, field_name])
-        return format_html(f'<a href="{link}" target="_blank">{link_text}</a>')
+    list_filter = (
+        wrap_with_application_filter(StatusFilter),
+        wrap_with_application_filter(OwnerFilter),
+        wrap_with_application_filter(RegistrarOrgFilter),
+        wrap_with_application_filter(RegistrantOrgFilter),
+        wrap_with_application_filter(LastUpdatedFilter),
+    )
+    search_fields = [
+        "application__reference",
+        "application__domain_name",
+        "application__status",
+    ]
 
     def download_file_view(self, request, object_id, field_name):
         review = self.model.objects.get(id=object_id)
         application = review.application
         file = getattr(application, field_name)
-        return FileResponse(file.open("rb"))
+        # We need to use root_storage as the default storage always
+        # refer to the TEMP_STORAGE_ROOT as the parent.
+        return FileResponse(s3_root_storage().open(file.name, "rb"))
 
-    def get_urls(self):
-        urls = super().get_urls()
-        custom_urls = [
-            path(
-                "download/<int:object_id>/<str:field_name>/",
-                self.admin_site.admin_view(self.download_file_view),
-                name="review_download_file",
-            ),
-        ]
-        return custom_urls + urls
+    @property
+    def uid(self):
+        return "review"
 
     def _get_formatted_display_fields(self, display_fields: dict) -> str:
-        return render_to_string(
-            "admin/reviewer_read_only_fields.html", {"display_fields": display_fields}
-        )
+        return render_to_string("admin/reviewer_read_only_fields.html", {"display_fields": display_fields})
 
     def get_registrar_fieldset(self, obj):
         return (
@@ -102,9 +349,7 @@ class ReviewAdmin(admin.ModelAdmin):
                         "Email address": obj.application.registrar_person.email_address,
                     }
                 )
-                + markdown.markdown(
-                    ReviewFormGuidance.objects.get(name="registrar_details").how_to
-                ),
+                + markdown.markdown(ReviewFormGuidance.objects.get(name="registrar_details").how_to),
             },
         )
 
@@ -122,11 +367,7 @@ class ReviewAdmin(admin.ModelAdmin):
                         "Reason for request": obj.application.domain_purpose,
                     }
                 )
-                + markdown.markdown(
-                    ReviewFormGuidance.objects.get(
-                        name="domain_name_availability"
-                    ).how_to
-                ),
+                + markdown.markdown(ReviewFormGuidance.objects.get(name="domain_name_availability").how_to),
             },
         )
 
@@ -138,9 +379,7 @@ class ReviewAdmin(admin.ModelAdmin):
                 "description": self._get_formatted_display_fields(
                     {"Registrant's organisation": obj.application.registrant_org.name}
                 )
-                + markdown.markdown(
-                    ReviewFormGuidance.objects.get(name="registrant_org").how_to
-                ),
+                + markdown.markdown(ReviewFormGuidance.objects.get(name="registrant_org").how_to),
             },
         )
 
@@ -156,47 +395,31 @@ class ReviewAdmin(admin.ModelAdmin):
                         "Email address": obj.application.registrant_person.email_address,
                     }
                 )
-                + markdown.markdown(
-                    ReviewFormGuidance.objects.get(name="registrant_person").how_to
-                ),
+                + markdown.markdown(ReviewFormGuidance.objects.get(name="registrant_person").how_to),
             },
         )
 
     def get_registrant_permission_fieldset(self, obj):
         if obj.application.written_permission_evidence:
-            download_link = self.generate_download_link(
-                obj, "written_permission_evidence", "View document"
-            )
+            download_link = self.generate_download_link(obj, "written_permission_evidence", "View document")
             return (
                 "The registrant's permission to apply for the domain",
                 {
                     "fields": ("registrant_permission", "registrant_permission_notes"),
-                    "description": self._get_formatted_display_fields(
-                        {"Evidence": download_link}
-                    )
-                    + markdown.markdown(
-                        ReviewFormGuidance.objects.get(
-                            name="registrant_permission"
-                        ).how_to
-                    ),
+                    "description": self._get_formatted_display_fields({"Evidence": download_link})
+                    + markdown.markdown(ReviewFormGuidance.objects.get(name="registrant_permission").how_to),
                 },
             )
 
     def get_policy_exemption_fieldset(self, obj):
         if obj.application.policy_exemption_evidence:
-            download_link = self.generate_download_link(
-                obj, "policy_exemption_evidence", "View document"
-            )
+            download_link = self.generate_download_link(obj, "policy_exemption_evidence", "View document")
             return (
                 "Exemption from using the GOV.UK website",
                 {
                     "fields": ("policy_exemption", "policy_exemption_notes"),
-                    "description": self._get_formatted_display_fields(
-                        {"Evidence": download_link}
-                    )
-                    + markdown.markdown(
-                        ReviewFormGuidance.objects.get(name="policy_exemption").how_to
-                    ),
+                    "description": self._get_formatted_display_fields({"Evidence": download_link})
+                    + markdown.markdown(ReviewFormGuidance.objects.get(name="policy_exemption").how_to),
                 },
             )
 
@@ -208,17 +431,13 @@ class ReviewAdmin(admin.ModelAdmin):
                 "description": self._get_formatted_display_fields(
                     {"Domain name requested": obj.application.domain_name}
                 )
-                + markdown.markdown(
-                    ReviewFormGuidance.objects.get(name="domain_name_rules").how_to
-                ),
+                + markdown.markdown(ReviewFormGuidance.objects.get(name="domain_name_rules").how_to),
             },
         )
 
     def get_senior_support_fieldset(self, obj):
         if obj.application.ministerial_request_evidence:
-            download_link = self.generate_download_link(
-                obj, "ministerial_request_evidence", "View document"
-            )
+            download_link = self.generate_download_link(obj, "ministerial_request_evidence", "View document")
             return (
                 "Domain name has Ministerial/Perm Sec support",
                 {
@@ -226,14 +445,8 @@ class ReviewAdmin(admin.ModelAdmin):
                         "registrant_senior_support",
                         "registrant_senior_support_notes",
                     ),
-                    "description": self._get_formatted_display_fields(
-                        {"Evidence": download_link}
-                    )
-                    + markdown.markdown(
-                        ReviewFormGuidance.objects.get(
-                            name="registrant_senior_support"
-                        ).how_to
-                    ),
+                    "description": self._get_formatted_display_fields({"Evidence": download_link})
+                    + markdown.markdown(ReviewFormGuidance.objects.get(name="registrant_senior_support").how_to),
                 },
             )
 
@@ -248,9 +461,15 @@ class ReviewAdmin(admin.ModelAdmin):
                         "Registrant email": obj.application.registry_published_person.email_address,
                     }
                 )
-                + markdown.markdown(
-                    ReviewFormGuidance.objects.get(name="registry_details").how_to
-                ),
+                + markdown.markdown(ReviewFormGuidance.objects.get(name="registry_details").how_to),
+            },
+        )
+
+    def get_reason_for_approval_rejection(self, obj):
+        return (
+            "Reason for Approval or Rejection",
+            {
+                "fields": ["reason"],
             },
         )
 
@@ -267,6 +486,7 @@ class ReviewAdmin(admin.ModelAdmin):
                 self.get_domain_name_rules_fieldset(obj),
                 self.get_senior_support_fieldset(obj),
                 self.get_registry_details(obj),
+                self.get_reason_for_approval_rejection(obj),
             )
             if fieldset
         ]
@@ -300,35 +520,37 @@ class ReviewAdmin(admin.ModelAdmin):
     def get_last_updated(self, obj):
         return convert_to_local_time(obj.application.last_updated)
 
+    @admin.display(description="Duration (days)")
+    def time_decided_local_time(self, review: Review) -> str:
+        return str(self.get_business_days_to_complete(review.application))
+
     @admin.display(description="Owner")
     def get_owner(self, obj):
         return obj.application.owner
+
+    @admin.display(description="Last updated by")
+    def get_last_updated_by(self, obj):
+        return obj.application.last_updated_by
 
     def response_change(self, request, obj):
         if "_approve" in request.POST:
             if obj.is_approvable():
                 return HttpResponseRedirect(
-                    f"{reverse('application_confirm')}?obj_id={obj.id}&action=approval"
+                    f"{reverse('application_confirm')}?obj_id={obj.application.id}&action=approval"
                 )
             else:
-                self.message_user(
-                    request, "This application can't be approved!", messages.ERROR
-                )
-                return HttpResponseRedirect(
-                    reverse("admin:request_review_change", args=[obj.id])
-                )
+                self.message_user(request, "This application can't be approved!", messages.ERROR)
+                return HttpResponseRedirect(reverse("admin:request_review_change", args=[obj.id]))
         if "_reject" in request.POST:
             if obj.is_rejectable():
                 return HttpResponseRedirect(
-                    f"{reverse('application_confirm')}?obj_id={obj.id}&action=rejection"
+                    f"{reverse('application_confirm')}?obj_id={obj.application.id}&action=rejection"
                 )
             else:
-                self.message_user(
-                    request, "This application can't be rejected!", messages.ERROR
-                )
-                return HttpResponseRedirect(
-                    reverse("admin:request_review_change", args=[obj.id])
-                )
+                self.message_user(request, "This application can't be rejected!", messages.ERROR)
+                return HttpResponseRedirect(reverse("admin:request_review_change", args=[obj.id]))
+        if "_change_status" in request.POST:
+            return HttpResponseRedirect(f"{reverse('change_status_view')}?obj_id={obj.application.id}")
         return super().response_change(request, obj)
 
     def save_model(self, request, obj, form, change):
@@ -336,30 +558,27 @@ class ReviewAdmin(admin.ModelAdmin):
         # Save the application attributes
         if obj.application.status == ApplicationStatus.NEW:
             obj.application.status = ApplicationStatus.IN_PROGRESS
-        # Change the owner to be the current user regardless if there is already a user
-        # assigned or not
-        obj.application.owner = request.user
+        if not obj.application.owner:
+            obj.application.owner = request.user
+            LOGGER.info(f"Initial owner assigned {obj.application} - {obj.application.owner}")
+
+        obj.application.last_updated_by = request.user
+        LOGGER.info(
+            f"Application {obj.application.reference} changed by {request.user} owner is {obj.application.owner}"
+        )
         obj.application.save()
 
-
-class CustomAdminFileWidget(AdminFileWidget):
-    """
-    Extend the default template to open the links on a new tab
-    """
-
-    template_name = "admin/clearable_file_input.html"
+    def has_add_permission(self, request):
+        return False
 
 
-class CustomChoicesFieldListFilter(ChoicesFieldListFilter):
-    """
-    Override the default template, so we can use a function for the list change event
-    and use that hash in the allowed hashes for the CSP list
-    """
-
-    template = "admin/dropdown_filter.html"
-
-
-class ApplicationAdmin(admin.ModelAdmin):
+class ApplicationAdmin(
+    SimpleHistoryAdmin,
+    FileDownloadMixin,
+    ReportDownLoadMixin,
+    ArchiveMixin,
+    admin.ModelAdmin,
+):
     model = Application
     list_display = [
         "reference",
@@ -368,21 +587,88 @@ class ApplicationAdmin(admin.ModelAdmin):
         "registrar_org",
         "registrant_org",
         "time_submitted_local_time",
+        "time_decided_local_time",
         "last_updated_local_time",
         "owner",
+        "last_updated_by",
     ]
-    list_filter = [
-        ("status", CustomChoicesFieldListFilter),
-        ("registrar_org", CustomChoicesFieldListFilter),
-        ("registrant_org", CustomChoicesFieldListFilter),
-    ]
+    readonly_fields = ["last_updated_by"]
+    list_filter = (
+        StatusFilter,
+        OwnerFilter,
+        RegistrarOrgFilter,
+        RegistrantOrgFilter,
+        LastUpdatedFilter,
+    )
     formfield_overrides = {
         django.db.models.fields.files.FileField: {"widget": CustomAdminFileWidget},
     }
+    actions = ["export", "archive"]
+    list_select_related = [
+        "owner",
+        "last_updated_by",
+        "registrar_person",
+        "registrant_person",
+        "registrant_org",
+        "registrar_org",
+    ]
+    search_fields = [
+        "reference",
+        "domain_name",
+        "status",
+        "registrar_org__name",
+        "registrant_org__name",
+        "owner__username",
+    ]
+
+    def get_field_names(self):
+        """
+        Get the field names for the CSV export.
+
+        This method returns a list of field names to be included in the CSV export.
+        The fields included are:
+        - reference: The reference number of the application.
+        - date_submitted: The date the application was submitted.
+        - registrar_org: The organization of the registrar.
+        - domain_name: The domain name requested.
+        - org_type: The type of organization.
+        - status: The current status of the application.
+        - application_month: The month the application was submitted.
+
+        :return: list of field names
+        """
+        field_names = [
+            "reference",
+            "Date Submitted",
+            "Registrar org",
+            "Domain name",
+            "Organisation type",
+            "status",
+            "Application month",
+            "Calendar days to complete",
+            "Date application is processed",
+            "Business days to complete",
+            "Application reviewed by",
+            "Approval Rejection comment",
+        ]
+        return field_names
+
+    def download_file_view(self, request, object_id, field_name):
+        application = self.model.objects.get(id=object_id)
+        file = getattr(application, field_name)
+        return FileResponse(s3_root_storage().open(file.name, "rb"))
+
+    @property
+    def uid(self):
+        return "application"
 
     @admin.display(description="Time Submitted (UK time)")
     def time_submitted_local_time(self, obj):
         return convert_to_local_time(obj.time_submitted)
+
+    @admin.display(description="Duration (days)")
+    def time_decided_local_time(self, app: Application) -> str:
+        return str(self.get_business_days_to_complete(app))
 
     @admin.display(description="Last updated (UK time)")
     def last_updated_local_time(self, obj):
@@ -396,4 +682,44 @@ class ApplicationAdmin(admin.ModelAdmin):
         # if the application owner is not set, then set it as the current user
         if not obj.owner and "owner" not in form.changed_data:
             obj.owner = request.user
+        obj.last_updated_by = request.user
         super().save_model(request, obj, form, change)
+
+
+class FilterAndOrderByName(ModelAdmin):
+    """
+    Utility base class that supports filtering and sorting by the name attribute
+    as wel as having the actions displayed on the bottom.
+    """
+
+    ordering = ["name"]
+    list_display = ["name"]
+    search_fields = ("name",)
+    actions_on_top = False
+    actions_on_bottom = True
+
+
+class RegistrarPersonAdmin(FilterAndOrderByName):
+    model = RegistrarPerson
+
+
+class RegistrantPersonAdmin(FilterAndOrderByName):
+    model = RegistrantPerson
+
+
+class RegistryPublishedPersonAdmin(FilterAndOrderByName):
+    model = RegistryPublishedPerson
+
+
+class RegistrantAdmin(FilterAndOrderByName):
+    model = Registrant
+
+
+class RegistrarAdmin(FilterAndOrderByName):
+    model = Registrar
+
+    actions = None
+    list_display = ["name", "active"]
+
+    def change_view(self, request, object_id=None, form_url="", extra_context=None):
+        return super().change_view(request, object_id, form_url, extra_context=dict(show_delete=False))

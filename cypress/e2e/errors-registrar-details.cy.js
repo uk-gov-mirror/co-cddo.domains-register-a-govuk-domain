@@ -11,26 +11,37 @@ describe('Error messages for registrar details', () => {
     cy.checkPageTitleIncludes('Registrar details')
 
     // but display errors
-    cy.confirmProblem('This field is required', 4)
+    cy.confirmProblem("Select your organisation", 4)
 
     // enter just the registrant
     cy.get('#id_registrar_organisation').clear().type('WeRegister')
     cy.get('#id_submit').click()
-    cy.confirmProblem('This field is required', 3)
+    cy.confirmProblem("Enter your full name", 3)
 
     // enter a bad phone number
     cy.fillOutRegistrarDetails('WeRegister', 'Joe', '01 2', 'joe@example.com')
-    cy.confirmProblem('Please enter a valid phone number')
+    cy.confirmProblem('Enter a telephone number, like 01632 960 001, 03034 443 000 or 07700 900 982')
+
+    // enter another bad phone number
+    cy.fillOutRegistrarDetails('WeRegister', 'Joe', '87746332234', 'joe@example.com')
+    cy.confirmProblem('Enter a telephone number, like 01632 960 001, 03034 443 000 or 07700 900 982')
 
     // enter a bad email address
     cy.fillOutRegistrarDetails('WeRegister', 'Joe', '01225123334', 'a@b.c')
-    cy.confirmProblem('Please enter a valid email address')
+    cy.confirmProblem('Enter an email address in the correct format, like name@example.co.uk')
 
     // enter valid details
     cy.fillOutRegistrarDetails('WeRegister', 'Joe', '01225123334', 'a@b.com')
 
     // No error, we've moved on to the next page
     cy.checkPageTitleIncludes('Who is this domain name for?')
+  })
 
+  it('accepts 9-digit phone numbers (rare, but possible)', () => {
+    cy.goToRegistrarDetails()
+
+    cy.get('#id_registrar_organisation').clear().type('WeRegister')
+    cy.fillOutRegistrarDetails('WeRegister', 'Joe', '01234 56789', 'joe@example.com')
+    cy.checkPageTitleIncludes('Who is this domain name for?')
   })
 })
