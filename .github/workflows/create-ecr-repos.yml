@@ -1,0 +1,63 @@
+name: Create ECR repositories
+
+# One off workflow per environment. This manually deploys the CDK stack
+# that creates the required ECR repositories to a chosen environment.
+# The docker app image build/push is handled separately by deploy.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - DEV
+          - TEST
+          - STAGING
+          - PROD
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: CDK deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      STACK: DomainsRegistrationStack
+    steps:
+      - name: Resolve AWS account
+        env:
+          AWS_ACCOUNT_IDS: ${{ secrets.AWS_ACCOUNT_IDS }}
+        run: |
+          echo "AWS_ACCOUNT_ID=$(echo "$AWS_ACCOUNT_IDS" | jq -r --arg e "$ENVIRONMENT" '.[$e]')" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install CDK and dependencies
+        env:
+            CDK_VERSION: "2.1126.0"
+        run: |
+          npm install -g "aws-cdk@${CDK_VERSION}"
+          uv pip install --system "aws-cdk-lib==${CDK_VERSION}" constructs
+
+      - name: Deploy
+        run: cdk deploy "$STACK" --require-approval never
