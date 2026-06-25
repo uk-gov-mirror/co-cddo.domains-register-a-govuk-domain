@@ -1,0 +1,12 @@
+[project]
+name = "domains-registration-infra"
+version = "0.1.0"
+description = "AWS CDK app for the domains-registration ECR repositories"
+requires-python = ">=3.13"
+dependencies = [
+    "aws-cdk-lib>=2.260.0,<3.0.0",
+    "constructs>=10.0.0,<11.0.0",
+]
+
+[tool.uv]
+package = false

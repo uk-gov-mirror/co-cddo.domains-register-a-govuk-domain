@@ -28,7 +28,7 @@ jobs:
     environment: ${{ inputs.environment }}
     env:
       ENVIRONMENT: ${{ inputs.environment }}
-      STACK: DomainsRegistrationStack
+      STACK: domains-registration-stack
     steps:
       - name: Resolve AWS account
         env:
@@ -36,28 +36,29 @@ jobs:
         run: |
           echo "AWS_ACCOUNT_ID=$(echo "$AWS_ACCOUNT_IDS" | jq -r --arg e "$ENVIRONMENT" '.[$e]')" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v8.2.0
         with:
           python-version: "3.13"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Install CDK and dependencies
         env:
-            CDK_VERSION: "2.1126.0"
+            CDK_CLI_VERSION: "2.1128.1"
+            CDK_LIB_VERSION: "2.260.0"
         run: |
-          npm install -g "aws-cdk@${CDK_VERSION}"
-          uv pip install --system "aws-cdk-lib==${CDK_VERSION}" constructs
+          npm install -g "aws-cdk@${CDK_CLI_VERSION}"
+          uv pip install --system "aws-cdk-lib==${CDK_LIB_VERSION}" constructs
 
       - name: Deploy
         run: cdk deploy "$STACK" --require-approval never
