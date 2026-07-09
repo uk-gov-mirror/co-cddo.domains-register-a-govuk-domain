@@ -75,6 +75,7 @@ describe('Errors when user skips and jumps pages', () => {
     cy.checkPageTitleIncludes('Invalid request')
     cy.go(3)
     cy.checkPageTitleIncludes('Invalid request')
+    cy.clearCookies('csrftoken') // For some reason this cookie isn't cleared
   })
 
   it('Throws a 400 when user goes back after submitting', () => {
@@ -109,6 +110,7 @@ describe('Errors when user skips and jumps pages', () => {
     cy.checkPageTitleIncludes('Invalid request')
     cy.go(3)
     cy.checkPageTitleIncludes('Invalid request')
+    cy.clearCookies('csrftoken') // For some reason this cookie isn't cleared
   })
 
   it('Throws a 400 when user goes back after submitting', () => {
