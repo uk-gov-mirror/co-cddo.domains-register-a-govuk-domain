@@ -2,20 +2,19 @@
 {% load i18n %}
 {% load url from simple_history_compat %}
 {% load admin_urls %}
-{% load display_list from simple_history_admin_list %}
 {% load admin_tags %}
 
 {% block content %}
     <div id="content-main">
         <div class="govuk-table">
-            {% if action_list %}
-                {% history_type action_list as history_type %}
+            {% if page_obj.object_list %}
+                {% history_type page_obj as history_type %}
                 {% if history_type == "Review" %}
                     {% display_review_list %}
                 {% elif history_type == "Application" %}
                     {% display_application_list %}
                 {% else %}
-                    {% display_list %}
+                    {% include object_history_list_template %}
                 {% endif %}
             {% else %}
                 <p>{% trans "This object doesn't have a change history." %}</p>
