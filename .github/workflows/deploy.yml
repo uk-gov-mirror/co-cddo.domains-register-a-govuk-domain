@@ -3,7 +3,7 @@ name: Build and Publish to ECR
 #########################################
 # Image deployment route to ECR
 # PR to main deploys to     => dev
-# push to main deploys to   => dev, test
+# push to main deploys to   => dev, test, misp
 # PR to stable deploys to   => staging
 # push to stable deploys to => prod
 #########################################
@@ -49,7 +49,7 @@ jobs:
           elif [[ "$EVENT" == "push" && "$REF" == "refs/heads/stable" ]]; then
             ENVS='["PROD"]'
           elif [[ "$EVENT" == "push" && "$REF" == "refs/heads/main" ]]; then
-            ENVS='["DEV","TEST"]'
+            ENVS='["DEV","TEST","MISP"]'
           elif [[ "$EVENT" == "pull_request" && "$BASE" == "stable" ]]; then
             ENVS='["STAGING"]'
           else
